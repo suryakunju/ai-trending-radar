@@ -11,6 +11,7 @@ import datetime as dt
 import json
 import os
 import pathlib
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -21,7 +22,8 @@ TOKEN = os.environ.get("GITHUB_TOKEN", "")
 TODAY = dt.datetime.now(dt.timezone.utc).date()
 KEEP_DAYS = 21       # how long star history is kept
 WATCH_DAYS = 10      # repos not seen by any search for this long drop off
-TOP_N = 40
+TOP_N = 30
+BREAKOUT_N = 20
 
 AI_WORDS = [
     "ai", "llm", "agent", "agents", "agentic", "gpt", "claude", "gemini", "openai",
@@ -32,6 +34,39 @@ AI_WORDS = [
     "robotics", "data", "analytics", "dataset", "vector", "retrieval", "automation",
     "workflow", "nlp", "ocr", "genai", "generative", "lora", "vllm", "ollama",
 ]
+
+
+# His focus: AI agents, agent skills and tools he can post about.
+FOCUS_WORDS = [
+    "agent", "agents", "agentic", "skill", "skills", "mcp", "claude", "claude-code",
+    "codex", "gemini", "copilot", "subagent", "multi-agent", "a2a", "adk", "langgraph",
+    "crewai", "autogen", "browser-use", "computer-use", "workflow", "automation",
+    "assistant", "plugin", "rag", "llm", "openai", "anthropic",
+]
+# Never useful for his posts.
+BLOCK_WORDS = [
+    "exploit", "cve-", "rce", "malware", "stealth", "undetected", "anti-detect",
+    "captcha", "keygen", "ddos", "phishing", "spam", "nsfw",
+    "awesome-", "interview", "leetcode", "homework", "tutorial", "course",
+]
+
+
+def text_of(repo):
+    return " ".join([repo.get("name") or "", repo.get("description") or "",
+                     " ".join(repo.get("topics") or [])]).lower().replace("_", "-")
+
+
+def has_word(text, words):
+    # Match at the start of a word, so "rag" doesn't hit "storage" and "rce" doesn't hit "resource".
+    return any(re.search(r"(?<![a-z0-9])" + re.escape(w), text) for w in words)
+
+
+def is_focus(repo):
+    return has_word(text_of(repo), FOCUS_WORDS)
+
+
+def is_blocked(repo):
+    return has_word(text_of(repo), BLOCK_WORDS)
 
 
 def days_ago(n):
@@ -48,6 +83,10 @@ QUERIES = [
 for topic in ["llm", "ai-agents", "agents", "mcp", "rag", "generative-ai",
               "large-language-models", "agentic-ai", "llm-agent", "robotics"]:
     QUERIES.append(f"language:python topic:{topic} pushed:>={days_ago(3)} stars:>=200")
+# Smaller repos (any age) that were just worked on: catches sleepers that suddenly take off.
+for topic in ["llm", "ai-agents", "mcp", "claude-code", "agent-skills", "rag", "generative-ai"]:
+    QUERIES.append(f"language:python topic:{topic} pushed:>={days_ago(2)} stars:30..199")
+QUERIES.append(f"language:python created:>={days_ago(3)} stars:>=10")
 
 
 def search(query):
@@ -149,40 +188,62 @@ def main():
         older = [d for d in h["stars"] if d <= week_day]
         if older:
             week = stars - h["stars"][max(older)]
+        meta = {"name": name, "description": info["description"], "topics": info["topics"]}
+        if is_blocked(meta):
+            continue
+        ai = is_ai(meta)
+        focus = is_focus(meta)
+        if not (ai or focus):
+            continue  # only AI-related repos make the list
+        prev_stars = max(stars - per_day, 0)
+        breakout = per_day / max(prev_stars, 50)  # growth relative to size
         rows.append({
+            "breakout": round(breakout, 3), "growth_pct": round(100 * per_day / max(prev_stars, 1)),
             "repo": name, "url": info["url"], "description": info["description"],
             "stars": stars, "stars_today": round(per_day), "how": how,
             "stars_7d": week, "created": info["created"], "pushed": info["pushed"],
-            "topics": info["topics"], "ai_related": is_ai({
-                "name": name, "description": info["description"], "topics": info["topics"]}),
+            "topics": info["topics"], "ai_related": ai, "focus": focus,
         })
 
     rows.sort(key=lambda r: r["stars_today"], reverse=True)
     top = [r for r in rows if r["stars_today"] > 0][:TOP_N]
+    # Breakouts: the fastest growth for their size (at least 25 new stars), not already in the top list.
+    in_top = {r["repo"] for r in top}
+    breakouts = sorted([r for r in rows if r["stars_today"] >= 25 and r["repo"] not in in_top],
+                       key=lambda r: r["breakout"], reverse=True)[:BREAKOUT_N]
 
     HISTORY_FILE.write_text(json.dumps(history, indent=0, sort_keys=True))
     (DATA / "trending.json").write_text(json.dumps(
         {"date": today, "source": "GitHub search API (official), daily star deltas",
-         "repos": top}, indent=2))
+         "repos": top, "breakouts": breakouts}, indent=2))
+
+    def table(title, intro, items):
+        out = [f"## {title}", "", intro, "",
+               "| # | Repo | Focus | Stars today | Growth | Total | 7 days | Created | What it is |",
+               "|---|---|---|---|---|---|---|---|---|"]
+        for i, r in enumerate(items, 1):
+            desc = r["description"].replace("|", "/").replace("\n", " ")[:160]
+            tag = "" if r["how"] == "measured" else " (est.)"
+            out.append(
+                f"| {i} | [{r['repo']}]({r['url']}) | {'★ agents/skills' if r['focus'] else 'AI'} | "
+                f"{r['stars_today']:,}{tag} | +{r['growth_pct']:,}% | "
+                f"{r['stars']:,} | {'' if r['stars_7d'] is None else format(r['stars_7d'], ',')} | "
+                f"{r['created']} | {desc} |")
+        return out + [""]
 
     lines = [
         f"# AI repo radar, {today}",
         "",
-        "Python repos gaining the most stars in the last day, from GitHub's official search API.",
-        "\"measured\" = real change since the last run; \"estimate\" = new repo, total stars divided by its age in days.",
+        "Python repos from GitHub's official search API. \"Stars today\" is the real change since the last run;",
+        "\"(est.)\" marks a repo seen for the first time (total stars divided by its age in days).",
+        "\"Growth\" is stars today as a share of the stars it had before.",
+        "Only AI-related repos are listed; ★ marks agents, skills, MCP and AI tooling (his focus).",
         "",
-        "| # | Repo | Stars today | Total | 7 days | AI? | Created | What it is |",
-        "|---|---|---|---|---|---|---|---|",
     ]
-    for i, r in enumerate(top, 1):
-        desc = r["description"].replace("|", "/")[:160]
-        tag = "" if r["how"] == "measured" else " (est.)"
-        lines.append(
-            f"| {i} | [{r['repo']}]({r['url']}) | {r['stars_today']:,}{tag} | {r['stars']:,} | "
-            f"{'' if r['stars_7d'] is None else format(r['stars_7d'], ',')} | "
-            f"{'yes' if r['ai_related'] else 'no'} | {r['created']} | {desc} |")
+    lines += table("Biggest gains", "Most new stars in the last day.", top)
+    lines += table("Breakouts", "Smaller repos growing fastest for their size (at least 25 new stars), not in the list above.", breakouts)
     (DATA / "trending.md").write_text("\n".join(lines) + "\n")
-    print(f"Wrote {len(top)} repos to data/trending.md")
+    print(f"Wrote {len(top)} top repos and {len(breakouts)} breakouts to data/trending.md")
 
 
 if __name__ == "__main__":
