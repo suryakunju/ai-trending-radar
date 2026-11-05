@@ -37,17 +37,23 @@ AI_WORDS = [
 
 
 # His focus: AI agents, agent skills and tools he can post about.
+# Tightened Nov 5 2026: generic words (workflow, automation, assistant, plugin,
+# llm, rag, gemini, claude on its own) tagged 46 of 50 repos, so the star meant nothing.
+# A repo is focus only when its name or description (not just its topics) says it
+# is an agent, a skill or MCP tooling.
 FOCUS_WORDS = [
-    "agent", "agents", "agentic", "skill", "skills", "mcp", "claude", "claude-code",
-    "codex", "gemini", "copilot", "subagent", "multi-agent", "a2a", "adk", "langgraph",
-    "crewai", "autogen", "browser-use", "computer-use", "workflow", "automation",
-    "assistant", "plugin", "rag", "llm", "openai", "anthropic",
+    "agent", "agents", "agentic", "subagent", "sub-agent", "multi-agent",
+    "skill", "skills", "mcp", "claude-code", "claude code", "codex", "computer-use",
+    "computer use", "browser-use", "a2a", "adk", "langgraph", "crewai", "autogen",
+    "antigravity",
 ]
 # Never useful for his posts.
 BLOCK_WORDS = [
     "exploit", "cve-", "rce", "malware", "stealth", "undetected", "anti-detect",
     "captcha", "keygen", "ddos", "phishing", "spam", "nsfw",
     "awesome-", "interview", "leetcode", "homework", "tutorial", "course",
+    "downloader", "crack", "cracked", "piracy", "pirate", "free-claude", "bypass",
+    "jailbreak", "uncensor", "censorship", "ad-cleaner", "mod ",
 ]
 
 
@@ -62,7 +68,8 @@ def has_word(text, words):
 
 
 def is_focus(repo):
-    return has_word(text_of(repo), FOCUS_WORDS)
+    name_desc = " ".join([repo.get("name") or "", repo.get("description") or ""]).lower().replace("_", "-")
+    return has_word(name_desc, FOCUS_WORDS)
 
 
 def is_blocked(repo):
